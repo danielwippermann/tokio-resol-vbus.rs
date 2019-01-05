@@ -77,11 +77,11 @@ impl TcpClientHandshake {
             };
 
             if first_byte == b'+' {
-                return Ok(Async::Ready(hs.take().unwrap()));
+                Ok(Async::Ready(hs.take().unwrap()))
             } else if first_byte == b'-' {
-                return Err(Error::new("Negative reply"));
+                Err(Error::new("Negative reply"))
             } else {
-                return Err(Error::new("Unexpected reply"));
+                Err(Error::new("Unexpected reply"))
             }
         })
     }
@@ -116,7 +116,7 @@ impl TcpClientHandshake {
                 }
             }
 
-            return Ok(Async::Ready(hs.take().unwrap()));
+            Ok(Async::Ready(hs.take().unwrap()))
         })
         .and_then(|hs| hs.read_reply())
     }
