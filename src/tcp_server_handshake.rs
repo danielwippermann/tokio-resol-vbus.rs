@@ -1,9 +1,19 @@
+use std::result::Result as StdResult;
+
 use futures::try_ready;
 use resol_vbus::BlobBuffer;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
 
 use crate::error::{Error, Result};
+
+type ReceiveCommandValidatorResult<T> = (&'static str, Option<Result<T>>);
+type ReceiveCommandValidatorFutureBox<T> =
+    Box<dyn Future<Item = ReceiveCommandValidatorResult<T>, Error = Error> + Send>;
+
+type ReceiveCommandSendReplyResult<S, T> = (S, Option<Result<T>>);
+type ReceiveCommandSendReplyFutureBox<S, T> =
+    Box<dyn Future<Item = ReceiveCommandSendReplyResult<S, T>, Error = Error> + Send>;
 
 /// Handles the server-side of the VBus-over-TCP handshake.
 ///
@@ -26,7 +36,13 @@ use crate::error::{Error, Result};
 ///     .map_err(|err| eprintln!("{}", err))
 ///     .for_each(|socket| {
 ///         let conn = TcpServerHandshake::start(socket)
-///             .and_then(|hs| hs.receive_pass_command_and_verify_password(|password| password == "vbus"))
+///             .and_then(|hs| hs.receive_pass_command_and_verify_password(|password| {
+///                 if password == "vbus" {
+///                     Ok(Some(password))
+///                 } else {
+///                     Ok(None)
+///                 }
+///             }))
 ///             .and_then(|(hs, _)| hs.receive_data_command())
 ///             .and_then(|socket| {
 ///                 // do something with the socket
@@ -82,7 +98,7 @@ impl TcpServerHandshake {
                 }
             }
 
-            return Ok(Async::Ready(hs.take().unwrap()));
+            Ok(Async::Ready(hs.take().unwrap()))
         })
     }
 
@@ -118,15 +134,18 @@ impl TcpServerHandshake {
     /// succeeded or `Err(&'static str)` in case of a verification
     /// failures. The provided reply string is sent back to the
     /// client and the command reception is repeated.
-    pub fn receive_command<V, T>(self, validator: V) -> impl Future<Item = (Self, T), Error = Error>
+    pub fn receive_command<V, R, T>(
+        self,
+        validator: V,
+    ) -> impl Future<Item = (Self, T), Error = Error>
     where
-        V: Fn(String, Option<String>) -> std::result::Result<T, &'static str>,
+        V: Fn(String, Option<String>) -> R,
+        R: Future<Item = StdResult<T, &'static str>, Error = Error> + Send + 'static,
         T: Send + 'static,
     {
         let mut self_option = Some(self);
-        let mut future1: Option<
-            Box<dyn Future<Item = (Self, Option<Result<T>>), Error = Error> + Send>,
-        > = None;
+        let mut future0: Option<ReceiveCommandValidatorFutureBox<T>> = None;
+        let mut future1: Option<ReceiveCommandSendReplyFutureBox<Self, T>> = None;
         let mut phase = 0;
 
         future::poll_fn(move || loop {
@@ -147,27 +166,38 @@ impl TcpServerHandshake {
                             (line.to_string(), None)
                         };
 
-                    let (reply, result) = if command == "QUIT" {
-                        ("+OK\r\n", Some(Err(Error::new("Received QUIT command"))))
+                    let future: ReceiveCommandValidatorFutureBox<T> = if command == "QUIT" {
+                        let result = ("+OK\r\n", Some(Err(Error::new("Received QUIT command"))));
+                        Box::new(future::ok(result))
                     } else {
-                        match validator(command, args) {
-                            Ok(value) => ("+OK\r\n", Some(Ok(value))),
-                            Err(reply) => (reply, None),
-                        }
+                        let future = validator(command, args);
+                        Box::new(future.and_then(|result| {
+                            let result = match result {
+                                Ok(value) => ("+OK\r\n", Some(Ok(value))),
+                                Err(reply) => (reply, None),
+                            };
+                            Ok(result)
+                        }))
                     };
+
+                    future0 = Some(future);
+                    phase = 1;
+                }
+                1 => {
+                    let (reply, result) = try_ready!(future0.as_mut().unwrap().poll());
 
                     let hs = self_option.take().unwrap();
                     let future = hs.send_reply(reply).and_then(|hs| Ok((hs, result)));
 
                     future1 = Some(Box::new(future));
-                    phase = 1;
+                    phase = 2;
                 }
-                1 => {
+                2 => {
                     let (hs, result) = try_ready!(future1.as_mut().unwrap().poll());
                     future1 = None;
 
                     if let Some(result) = result {
-                        phase = 2;
+                        phase = 3;
                         match result {
                             Ok(value) => break Ok(Async::Ready((hs, value))),
                             Err(err) => break Err(err),
@@ -176,10 +206,10 @@ impl TcpServerHandshake {
                         phase = 0;
                     }
                 }
-                // Phase 2:
+                // Phase 3:
                 // - this future is already resolved
                 // - panic!
-                2 => panic!("Called poll() on resolved future"),
+                3 => panic!("Called poll() on resolved future"),
                 _ => unreachable!(),
             }
         })
@@ -188,56 +218,72 @@ impl TcpServerHandshake {
     /// Wait for a `CONNECT <via_tag>` command.
     pub fn receive_connect_command(self) -> impl Future<Item = (Self, String), Error = Error> {
         self.receive_command(|command, args| {
-            if command != "CONNECT" {
+            let result = if command != "CONNECT" {
                 Err("-ERROR Expected CONNECT command\r\n")
             } else if let Some(args) = args {
                 Ok(args)
             } else {
                 Err("-ERROR Expected argument\r\n")
-            }
+            };
+
+            future::ok(result)
         })
     }
 
     /// Wait for a `PASS <password>` command.
     pub fn receive_pass_command(self) -> impl Future<Item = (Self, String), Error = Error> {
         self.receive_command(|command, args| {
-            if command != "PASS" {
+            let result = if command != "PASS" {
                 Err("-ERROR Expected PASS command\r\n")
             } else if let Some(args) = args {
                 Ok(args)
             } else {
                 Err("-ERROR Expected argument\r\n")
-            }
+            };
+
+            future::ok(result)
         })
     }
 
     /// Wait for a `PASS <password>` command and validate the provided password.
-    pub fn receive_pass_command_and_verify_password<V>(
+    pub fn receive_pass_command_and_verify_password<V, F, R>(
         self,
         validator: V,
     ) -> impl Future<Item = (Self, String), Error = Error>
     where
-        V: Fn(&str) -> bool,
+        V: Fn(String) -> F,
+        F: IntoFuture<Item = Option<String>, Error = Error, Future = R> + Send,
+        R: Future<Item = Option<String>, Error = Error> + Send + 'static,
     {
         self.receive_command(move |command, args| {
-            if command != "PASS" {
+            let result = if command != "PASS" {
                 Err("-ERROR Expected PASS command\r\n")
             } else if let Some(password) = args {
-                if validator(&password) {
-                    Ok(password)
-                } else {
-                    Err("-ERROR Invalid password\r\n")
-                }
+                Ok(password)
             } else {
                 Err("-ERROR Expected argument\r\n")
-            }
+            };
+
+            let future: Box<
+                dyn Future<Item = StdResult<String, &'static str>, Error = Error> + Send,
+            > = match result {
+                Ok(password) => Box::new(validator(password).into_future().map(
+                    |result| match result {
+                        Some(password) => Ok(password),
+                        None => Err("-ERROR Invalid password\r\n"),
+                    },
+                )),
+                Err(reply) => Box::new(future::ok(Err(reply))),
+            };
+
+            future
         })
     }
 
     /// Wait for a `CHANNEL <channel>` command.
     pub fn receive_channel_command(self) -> impl Future<Item = (Self, u8), Error = Error> {
         self.receive_command(|command, args| {
-            if command != "CHANNEL" {
+            let result = if command != "CHANNEL" {
                 Err("-ERROR Expected CHANNEL command\r\n")
             } else if let Some(args) = args {
                 if let Ok(channel) = args.parse::<u8>() {
@@ -247,47 +293,62 @@ impl TcpServerHandshake {
                 }
             } else {
                 Err("-ERROR Expected argument\r\n")
-            }
+            };
+
+            future::ok(result)
         })
     }
 
     /// Wait for `CHANNEL <channel>` command and validate the provided channel
-    pub fn receive_channel_command_and_verify_channel<V>(
+    pub fn receive_channel_command_and_verify_channel<V, F, R>(
         self,
         validator: V,
     ) -> impl Future<Item = (Self, u8), Error = Error>
     where
-        V: Fn(u8) -> bool,
+        V: Fn(u8) -> F,
+        F: IntoFuture<Item = Option<u8>, Error = Error, Future = R> + Send + 'static,
+        R: Future<Item = Option<u8>, Error = Error> + Send + 'static,
     {
         self.receive_command(move |command, args| {
-            if command != "CHANNEL" {
+            let result = if command != "CHANNEL" {
                 Err("-ERROR Expected CHANNEL command\r\n")
             } else if let Some(args) = args {
                 if let Ok(channel) = args.parse::<u8>() {
-                    if validator(channel) {
-                        Ok(channel)
-                    } else {
-                        Err("-ERROR Invalid channel\r\n")
-                    }
+                    Ok(channel)
                 } else {
                     Err("-ERROR Expected 8 bit number argument\r\n")
                 }
             } else {
                 Err("-ERROR Expected argument\r\n")
-            }
+            };
+
+            let future: Box<dyn Future<Item = StdResult<u8, &'static str>, Error = Error> + Send> =
+                match result {
+                    Ok(channel) => {
+                        Box::new(validator(channel).into_future().map(|result| match result {
+                            Some(channel) => Ok(channel),
+                            None => Err("-ERROR Invalid channel\r\n"),
+                        }))
+                    }
+                    Err(reply) => Box::new(future::ok(Err(reply))),
+                };
+
+            future
         })
     }
 
     /// Wait for a `DATA` command.
     pub fn receive_data_command(self) -> impl Future<Item = TcpStream, Error = Error> {
         self.receive_command(|command, args| {
-            if command != "DATA" {
+            let result = if command != "DATA" {
                 Err("-ERROR Expected DATA command\r\n")
             } else if args.is_some() {
                 Err("-ERROR Did not expect arguments\r\n")
             } else {
                 Ok(())
-            }
+            };
+
+            future::ok(result)
         })
         .map(|(hs, _)| hs.into_inner())
     }
@@ -338,11 +399,23 @@ mod tests {
             .and_then(|hs| hs.receive_connect_command())
             .and_then(|(hs, args)| {
                 assert_eq!("via_tag", args);
-                hs.receive_pass_command()
+                hs.receive_pass_command_and_verify_password(|password| {
+                    if password == "password" {
+                        Ok(Some(password))
+                    } else {
+                        Ok(None)
+                    }
+                })
             })
             .and_then(|(hs, args)| {
                 assert_eq!("password", args);
-                hs.receive_channel_command()
+                hs.receive_channel_command_and_verify_channel(|channel| {
+                    if channel == 123 {
+                        Ok(Some(channel))
+                    } else {
+                        Ok(None)
+                    }
+                })
             })
             .and_then(|(hs, channel)| {
                 assert_eq!(123, channel);
