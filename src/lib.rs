@@ -8,6 +8,39 @@
 //! in conjunction with the `tokio` crate.
 //!
 //!
+//! ## Features
+//! 
+//! - Provides helpers for VBus-over-TCP handshake
+//! - Allows to send and receive data to / from a controller asynchronously
+//!
+//! 
+//! ## Planned, but not yet implemented features
+//!
+//! - Discovers LAN-enabled RESOL devices on the local network
+//! 
+//! 
+//! ## Supported Devices & Services
+//!
+//! * [All current RESOL controllers with VBus](http://www.resol.de/index/produkte/sprache/en)
+//! * [RESOL DL2 Datalogger](http://www.resol.de/index/produktdetail/kategorie/2/sprache/en/id/12)
+//! * [RESOL DL3 Datalogger](http://www.resol.de/index/produktdetail/kategorie/2/sprache/en/id/86)
+//! * [RESOL VBus/LAN interface adapter](http://www.resol.de/index/produktdetail/kategorie/2/id/76/sprache/en)
+//! * [RESOL VBus/USB interface adapter](http://www.resol.de/index/produktdetail/kategorie/2/id/13/sprache/en)
+//! * [RESOL VBus.net](http://www.vbus.net/)
+//!
+//!
+//! ## Technical Information & Specifications
+//!
+//! * [RESOL VBus Google Group](https://groups.google.com/forum/#!forum/resol-vbus)
+//! * [RESOL VBus Protocol Specification](http://danielwippermann.github.io/resol-vbus/vbus-specification.html)
+//! * [RESOL VBus Packet List](http://danielwippermann.github.io/resol-vbus/vbus-packets.html)
+//! * [RESOL VBus Recording File Format](http://danielwippermann.github.io/resol-vbus/vbus-recording-file-format.html)
+//! * [RESOL VBus Specification File Format v1](http://danielwippermann.github.io/resol-vbus/vbus-specification-file-format-v1.html)
+//! * [RESOL VBus over TCP Specification](http://danielwippermann.github.io/resol-vbus/vbus-over-tcp.html)
+//! * [RESOL DL2 (v1) Data Download API](https://drive.google.com/file/d/0B4wMTuLGRPi2YmM5ZTJiNDQtNjkyMi00ZWYzLTgzYzgtYTdiMjBlZmI5ODgx/edit?usp=sharing)
+//! * [RESOL DL2 (v2) & DL3 Data Download API](http://danielwippermann.github.io/resol-vbus/dlx-data-download-api.html)
+//!
+//!
 //! ## Examples
 //!
 //! ### Recorder of live VBus data into a persistent file format
