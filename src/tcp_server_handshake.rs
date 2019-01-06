@@ -15,7 +15,9 @@ type ReceiveCommandSendReplyResult<S, T> = (S, Option<Result<T>>);
 type ReceiveCommandSendReplyFutureBox<S, T> =
     Box<dyn Future<Item = ReceiveCommandSendReplyResult<S, T>, Error = Error> + Send>;
 
-/// Handles the server-side of the VBus-over-TCP handshake.
+/// Handles the server-side of the [VBus-over-TCP][1] handshake.
+///
+/// [1]: http://danielwippermann.github.io/resol-vbus/vbus-over-tcp.html
 ///
 /// # Examples
 ///
@@ -77,7 +79,7 @@ impl TcpServerHandshake {
     }
 
     /// Send a reply to the client.
-    pub fn send_reply(self, reply: &'static str) -> impl Future<Item = Self, Error = Error> {
+    fn send_reply(self, reply: &'static str) -> impl Future<Item = Self, Error = Error> {
         let mut hs = Some(self);
         let bytes = reply.as_bytes();
         let mut idx = 0;
@@ -122,18 +124,22 @@ impl TcpServerHandshake {
         }
     }
 
-    /// Receive a command and verify its provided argument. The command
-    /// reception is repeated as long as the verification fails.
+    /// Receive a command and verify it and its provided arguments. The
+    /// command reception is repeated as long as the verification fails.
     ///
-    /// The method takes two functions as parameters:
+    /// The preferred way to receive commands documented in the VBus-over-TCP
+    /// specification is through the `receive_xxx_command` and
+    /// `receive_xxx_command_and_verify_yyy` methods which use the
+    /// `receive_command` method internally.
     ///
-    /// 1. The `receive_xxx_command` method to use and
-    /// 2. The verifier to check the received arg against
-    ///
-    /// The verifier can either return `Ok(())` if the verification
-    /// succeeded or `Err(&'static str)` in case of a verification
-    /// failures. The provided reply string is sent back to the
-    /// client and the command reception is repeated.
+    /// This method takes a validator function that is called with the
+    /// received command and its optional arguments. The validator
+    /// returns a `Future` that can resolve into an
+    /// `std::result::Result<T, &'static str>`. It can either be:
+    /// - `Ok(value)` if the validation succeeded. The `value` is used
+    ///   to resolve the `receive_command` `Future`.
+    /// - `Err(reply)` if the validation failed. The `reply` is send
+    ///   back to the client and the command reception is repeated.
     pub fn receive_command<V, R, T>(
         self,
         validator: V,
@@ -215,34 +221,49 @@ impl TcpServerHandshake {
         })
     }
 
-    /// Wait for a `CONNECT <via_tag>` command.
+    /// Wait for a `CONNECT <via_tag>` command. The via tag argument is returned.
     pub fn receive_connect_command(self) -> impl Future<Item = (Self, String), Error = Error> {
-        self.receive_command(|command, args| {
+        self.receive_connect_command_and_verify_via_tag(|via_tag| Ok(Some(via_tag)))
+    }
+
+    /// Wait for a `CONNECT <via_tag>` command.
+    pub fn receive_connect_command_and_verify_via_tag<V, F, R>(
+        self,
+        validator: V,
+    ) -> impl Future<Item = (Self, String), Error = Error>
+    where
+        V: Fn(String) -> F,
+        F: IntoFuture<Item = Option<String>, Error = Error, Future = R> + Send,
+        R: Future<Item = Option<String>, Error = Error> + Send + 'static,
+    {
+        self.receive_command(move |command, args| {
             let result = if command != "CONNECT" {
                 Err("-ERROR Expected CONNECT command\r\n")
-            } else if let Some(args) = args {
-                Ok(args)
+            } else if let Some(via_tag) = args {
+                Ok(via_tag)
             } else {
                 Err("-ERROR Expected argument\r\n")
             };
 
-            future::ok(result)
+            let future: Box<
+                dyn Future<Item = StdResult<String, &'static str>, Error = Error> + Send,
+            > = match result {
+                Ok(via_tag) => {
+                    Box::new(validator(via_tag).into_future().map(|result| match result {
+                        Some(via_tag) => Ok(via_tag),
+                        None => Err("-ERROR Invalid via tag\r\n"),
+                    }))
+                }
+                Err(reply) => Box::new(future::ok(Err(reply))),
+            };
+
+            future
         })
     }
 
     /// Wait for a `PASS <password>` command.
     pub fn receive_pass_command(self) -> impl Future<Item = (Self, String), Error = Error> {
-        self.receive_command(|command, args| {
-            let result = if command != "PASS" {
-                Err("-ERROR Expected PASS command\r\n")
-            } else if let Some(args) = args {
-                Ok(args)
-            } else {
-                Err("-ERROR Expected argument\r\n")
-            };
-
-            future::ok(result)
-        })
+        self.receive_pass_command_and_verify_password(|password| Ok(Some(password)))
     }
 
     /// Wait for a `PASS <password>` command and validate the provided password.
@@ -282,21 +303,7 @@ impl TcpServerHandshake {
 
     /// Wait for a `CHANNEL <channel>` command.
     pub fn receive_channel_command(self) -> impl Future<Item = (Self, u8), Error = Error> {
-        self.receive_command(|command, args| {
-            let result = if command != "CHANNEL" {
-                Err("-ERROR Expected CHANNEL command\r\n")
-            } else if let Some(args) = args {
-                if let Ok(channel) = args.parse::<u8>() {
-                    Ok(channel)
-                } else {
-                    Err("-ERROR Expected 8 bit number argument\r\n")
-                }
-            } else {
-                Err("-ERROR Expected argument\r\n")
-            };
-
-            future::ok(result)
-        })
+        self.receive_channel_command_and_verify_channel(|channel| Ok(Some(channel)))
     }
 
     /// Wait for `CHANNEL <channel>` command and validate the provided channel

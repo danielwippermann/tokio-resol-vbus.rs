@@ -16,7 +16,26 @@ use tokio::{prelude::*, timer::Delay};
 
 use crate::error::Error;
 
-/// A `Stream`/`Sink` wrapper for RESOL VBus `Data` items.
+fn into_datagram<R, W>(
+    args: (LiveDataStream<R, W>, Option<Data>),
+) -> (LiveDataStream<R, W>, Option<Datagram>)
+where
+    R: AsyncRead,
+    W: AsyncWrite,
+{
+    let (lds, opt_data) = args;
+    let opt_dgram = match opt_data {
+        Some(data) => Some(data.into_datagram()),
+        None => None,
+    };
+    (lds, opt_dgram)
+}
+
+/// A `Stream`/`Sink` wrapper for RESOL VBus `Data` items encoded in the
+/// live / wire representation.
+///
+/// It also contains methods to communicate with a VBus device to get or set
+/// values etc.
 #[derive(Debug)]
 pub struct LiveDataStream<R: AsyncRead, W: AsyncWrite> {
     reader: R,
@@ -65,16 +84,82 @@ impl<R: AsyncRead, W: AsyncWrite> LiveDataStream<R, W> {
         }
     }
 
-    /// Wait for any VBus data.
-    pub fn wait_for_data(
+    /// Receive data from the VBus.
+    ///
+    /// This methods waits for `timeout_ms` milliseconds for incoming
+    /// VBus data. Every time a valid `Data` is received over the VBus
+    /// the `filter` function is called with that `Data` as its argument.
+    /// The function returns a `bool` whether the provided `Data` is the
+    /// data it was waiting for.
+    ///
+    /// If the `filter` function returns `true`, the respective `Data`
+    /// is used to resolve the `receive` method's `Future`.
+    ///
+    /// If the `filter` function did not find the matching data within
+    /// `timeout_ms` milliseconds, the `receive` method's `Future` resolves
+    /// with `(self, None)`.
+    pub fn receive<F>(
         self,
-        timeout: u64,
+        timeout_ms: u64,
+        filter: F,
+    ) -> impl Future<Item = (Self, Option<Data>), Error = Error>
+    where
+        F: Fn(&Data) -> bool + Send + 'static,
+    {
+        ActionFuture::new(self, None, 1, timeout_ms, 0, Box::new(filter))
+    }
+
+    /// Send data to the VBus and wait for a reply.
+    ///
+    /// This method sends the `tx_data` to the VBus and waits for up to
+    /// `initial_timeout_ms` milliseconds for a reply.
+    ///
+    /// Every time a valid `Data` is received over the VBus the `filter`
+    /// function is called with that `Data` as its argument. The function
+    /// returns a `bool` whether the provided `Data` is the reply it was
+    /// waiting for.
+    ///
+    /// If the `filter` function returns `true`, the respective `Data`
+    /// is used to resolve the `transceive` method's `Future`.
+    ///
+    /// If the `filter` function did not find the matching reply within
+    /// `initial_timeout_ms` milliseconds, the `tx_data` is send again up
+    /// `max_tries` times, increasing the timeout by `timeout_increment_ms`
+    /// milliseconds every time.
+    ///
+    /// After `max_tries` without a matching reply the `transceive` method's
+    /// `Future` resolves with `(self, None)`.
+    pub fn transceive<F>(
+        self,
+        tx_data: Data,
+        max_tries: usize,
+        initial_timeout_ms: u64,
+        timeout_increment_ms: u64,
+        filter: F,
+    ) -> impl Future<Item = (Self, Option<Data>), Error = Error>
+    where
+        F: Fn(&Data) -> bool + Send + 'static,
+    {
+        ActionFuture::new(
+            self,
+            Some(tx_data),
+            max_tries,
+            initial_timeout_ms,
+            timeout_increment_ms,
+            Box::new(filter),
+        )
+    }
+
+    /// Wait for any VBus data.
+    pub fn receive_any_data(
+        self,
+        timeout_ms: u64,
     ) -> impl Future<Item = (Self, Option<Data>), Error = Error> {
-        ActionFuture::new(self, None, 1, timeout, 0, Box::new(|_| true))
+        self.receive(timeout_ms, |_| true)
     }
 
     /// Wait for a datagram that offers VBus control.
-    pub fn wait_for_free_bus(self) -> impl Future<Item = (Self, Option<Data>), Error = Error> {
+    pub fn wait_for_free_bus(self) -> impl Future<Item = (Self, Option<Datagram>), Error = Error> {
         ActionFuture::new(
             self,
             None,
@@ -93,6 +178,7 @@ impl<R: AsyncRead, W: AsyncWrite> LiveDataStream<R, W> {
                 }
             }),
         )
+        .map(into_datagram)
     }
 
     /// Give back bus control to the regular VBus master.
@@ -120,7 +206,7 @@ impl<R: AsyncRead, W: AsyncWrite> LiveDataStream<R, W> {
         address: u16,
         index: i16,
         subindex: u8,
-    ) -> impl Future<Item = (Self, Option<Data>), Error = Error> {
+    ) -> impl Future<Item = (Self, Option<Datagram>), Error = Error> {
         let tx_dgram = self.create_datagram(address, 0x0300 | u16::from(subindex), index, 0);
 
         let tx_data = Some(Data::Datagram(tx_dgram.clone()));
@@ -149,6 +235,7 @@ impl<R: AsyncRead, W: AsyncWrite> LiveDataStream<R, W> {
                 }
             }),
         )
+        .map(into_datagram)
     }
 
     /// Set a value by its index.
@@ -158,7 +245,7 @@ impl<R: AsyncRead, W: AsyncWrite> LiveDataStream<R, W> {
         index: i16,
         subindex: u8,
         value: i32,
-    ) -> impl Future<Item = (Self, Option<Data>), Error = Error> {
+    ) -> impl Future<Item = (Self, Option<Datagram>), Error = Error> {
         let tx_dgram = self.create_datagram(address, 0x0200 | u16::from(subindex), index, value);
 
         let tx_data = Some(Data::Datagram(tx_dgram.clone()));
@@ -187,6 +274,7 @@ impl<R: AsyncRead, W: AsyncWrite> LiveDataStream<R, W> {
                 }
             }),
         )
+        .map(into_datagram)
     }
 
     /// Get a value's ID hash by its index.
@@ -194,7 +282,7 @@ impl<R: AsyncRead, W: AsyncWrite> LiveDataStream<R, W> {
         self,
         address: u16,
         index: i16,
-    ) -> impl Future<Item = (Self, Option<Data>), Error = Error> {
+    ) -> impl Future<Item = (Self, Option<Datagram>), Error = Error> {
         let tx_dgram = self.create_datagram(address, 0x1000, index, 0);
 
         let tx_data = Some(Data::Datagram(tx_dgram.clone()));
@@ -223,6 +311,7 @@ impl<R: AsyncRead, W: AsyncWrite> LiveDataStream<R, W> {
                 }
             }),
         )
+        .map(into_datagram)
     }
 
     /// Get a value's index by its ID hash.
@@ -230,7 +319,7 @@ impl<R: AsyncRead, W: AsyncWrite> LiveDataStream<R, W> {
         self,
         address: u16,
         id_hash: i32,
-    ) -> impl Future<Item = (Self, Option<Data>), Error = Error> {
+    ) -> impl Future<Item = (Self, Option<Datagram>), Error = Error> {
         let tx_dgram = self.create_datagram(address, 0x1100, 0, id_hash);
 
         let tx_data = Some(Data::Datagram(tx_dgram.clone()));
@@ -259,13 +348,14 @@ impl<R: AsyncRead, W: AsyncWrite> LiveDataStream<R, W> {
                 }
             }),
         )
+        .map(into_datagram)
     }
 
     /// Get the capabilities (part 1) from a VBus device.
     pub fn get_caps1(
         self,
         address: u16,
-    ) -> impl Future<Item = (Self, Option<Data>), Error = Error> {
+    ) -> impl Future<Item = (Self, Option<Datagram>), Error = Error> {
         let tx_dgram = self.create_datagram(address, 0x1300, 0, 0);
 
         let tx_data = Some(Data::Datagram(tx_dgram.clone()));
@@ -292,6 +382,7 @@ impl<R: AsyncRead, W: AsyncWrite> LiveDataStream<R, W> {
                 }
             }),
         )
+        .map(into_datagram)
     }
 
     /// Begin a bulk value transaction.
@@ -299,7 +390,7 @@ impl<R: AsyncRead, W: AsyncWrite> LiveDataStream<R, W> {
         self,
         address: u16,
         tx_timeout: i32,
-    ) -> impl Future<Item = (Self, Option<Data>), Error = Error> {
+    ) -> impl Future<Item = (Self, Option<Datagram>), Error = Error> {
         let tx_dgram = self.create_datagram(address, 0x1400, 0, tx_timeout);
 
         let tx_data = Some(Data::Datagram(tx_dgram.clone()));
@@ -326,13 +417,14 @@ impl<R: AsyncRead, W: AsyncWrite> LiveDataStream<R, W> {
                 }
             }),
         )
+        .map(into_datagram)
     }
 
     /// Commit a bulk value transaction.
     pub fn commit_bulk_value_transaction(
         self,
         address: u16,
-    ) -> impl Future<Item = (Self, Option<Data>), Error = Error> {
+    ) -> impl Future<Item = (Self, Option<Datagram>), Error = Error> {
         let tx_dgram = self.create_datagram(address, 0x1402, 0, 0);
 
         let tx_data = Some(Data::Datagram(tx_dgram.clone()));
@@ -359,13 +451,14 @@ impl<R: AsyncRead, W: AsyncWrite> LiveDataStream<R, W> {
                 }
             }),
         )
+        .map(into_datagram)
     }
 
     /// Rollback a bulk value transaction.
     pub fn rollback_bulk_value_transaction(
         self,
         address: u16,
-    ) -> impl Future<Item = (Self, Option<Data>), Error = Error> {
+    ) -> impl Future<Item = (Self, Option<Datagram>), Error = Error> {
         let tx_dgram = self.create_datagram(address, 0x1404, 0, 0);
 
         let tx_data = Some(Data::Datagram(tx_dgram.clone()));
@@ -392,6 +485,7 @@ impl<R: AsyncRead, W: AsyncWrite> LiveDataStream<R, W> {
                 }
             }),
         )
+        .map(into_datagram)
     }
 
     /// Set a value by its index while inside a bulk value transaction.
@@ -401,7 +495,7 @@ impl<R: AsyncRead, W: AsyncWrite> LiveDataStream<R, W> {
         index: i16,
         subindex: u8,
         value: i32,
-    ) -> impl Future<Item = (Self, Option<Data>), Error = Error> {
+    ) -> impl Future<Item = (Self, Option<Datagram>), Error = Error> {
         let tx_dgram = self.create_datagram(address, 0x1500 | u16::from(subindex), index, value);
 
         let tx_data = Some(Data::Datagram(tx_dgram.clone()));
@@ -430,6 +524,7 @@ impl<R: AsyncRead, W: AsyncWrite> LiveDataStream<R, W> {
                 }
             }),
         )
+        .map(into_datagram)
     }
 }
 
@@ -720,6 +815,12 @@ mod tests {
             buf.resize(len, 0);
             bytes_from_data(self, &mut buf);
             buf
+        }
+    }
+
+    impl ToBytes for Datagram {
+        fn to_bytes(&self) -> Vec<u8> {
+            Data::Datagram(self.clone()).to_bytes()
         }
     }
 

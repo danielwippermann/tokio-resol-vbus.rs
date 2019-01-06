@@ -4,7 +4,9 @@ use resol_vbus::BlobBuffer;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
 
-/// Handles the client-side of the VBus-over-TCP handshake.
+/// Handles the client-side of the [VBus-over-TCP][1] handshake.
+///
+/// [1]: http://danielwippermann.github.io/resol-vbus/vbus-over-tcp.html
 ///
 /// # Examples
 ///
