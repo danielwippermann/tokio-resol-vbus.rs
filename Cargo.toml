@@ -8,3 +8,6 @@ edition = "2018"
 futures = "0.1"
 resol-vbus = { path = "../resol-vbus.rs" }
 tokio = "0.1"
+
+[dev-dependencies]
+tokio-serial = "3.1.0"
