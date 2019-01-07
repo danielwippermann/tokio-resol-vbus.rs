@@ -13,7 +13,7 @@ if: type != push OR (tag IS blank AND branch = master)
 addons:
   apt:
     packages:
-    - libudev
+    - libudev-dev
 
 # an entry in stage=test will be generated for each rust/os combination.
 # each entry will run these commands.
