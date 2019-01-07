@@ -9,16 +9,16 @@
 //!
 //!
 //! ## Features
-//! 
+//!
 //! - Provides helpers for VBus-over-TCP handshake
 //! - Allows to send and receive data to / from a controller asynchronously
 //!
-//! 
+//!
 //! ## Planned, but not yet implemented features
 //!
 //! - Discovers LAN-enabled RESOL devices on the local network
-//! 
-//! 
+//!
+//!
 //! ## Supported Devices & Services
 //!
 //! * [All current RESOL controllers with VBus](http://www.resol.de/index/produkte/sprache/en)
@@ -66,16 +66,16 @@
 //!     // Connect to the DL2
 //!     let handler = TcpStream::connect(&addr)
 //!         .map_err(Error::from)
-//! 
+//!
 //!         // Start the handshake
 //!         .and_then(TcpClientHandshake::start)
-//! 
+//!
 //!         // Authenticate using a password
 //!         .and_then(|hs| hs.send_pass_command("vbus"))
-//! 
+//!
 //!         // Switch to VBus data mode
 //!         .and_then(|hs| hs.send_data_command())
-//! 
+//!
 //!         .and_then(|socket| {
 //!             // Wrap the socket in a VBus `LiveDataStream`
 //!             let (reader, writer) = socket.split();
@@ -97,7 +97,7 @@
 //!                 Ok(())
 //!             })
 //!         })
-//! 
+//!
 //!         .map_err(|err| {
 //!             eprintln!("{}", err);
 //!         });
