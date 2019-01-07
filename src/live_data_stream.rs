@@ -563,7 +563,7 @@ impl<R: AsyncRead, W: AsyncWrite> Sink for LiveDataStream<R, W> {
 
     fn start_send(&mut self, data: Data) -> StartSend<Data, Error> {
         let len = length_from_data(&data);
-        let mut buf = Vec::with_capacity(len);
+        let mut buf = vec![0; len];
         buf.resize(len, 0);
         bytes_from_data(&data, &mut buf);
 
@@ -622,7 +622,7 @@ impl<R: AsyncRead, W: AsyncWrite> ActionFuture<R, W> {
     ) -> ActionFuture<R, W> {
         let tx_data = tx_data.map(|ref data| {
             let len = length_from_data(data);
-            let mut buf = Vec::with_capacity(len);
+            let mut buf = vec![0; len];
             buf.resize(len, 0);
             bytes_from_data(data, &mut buf);
             buf
